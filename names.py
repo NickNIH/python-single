@@ -99,17 +99,22 @@ def main(argv):
   else:
     names_list = read_names_files(args.names)
   unused_static_names = randomize(get_unused_names(names_list, used_names_lc))
-  for name in sorted(unused_static_names[:args.num_names]):
-    print(name)
+  if unused_static_names:
+    print_files_header(args.names)
+    for name in sorted(unused_static_names[:args.num_names]):
+      print(name)
 
   needed_names = args.num_names - len(unused_static_names)
 
   # Print random names (from rig), if needed.
 
   if needed_names:
-    unused_random_names = get_unused_random_names(needed_names, used_names_lc, gender='male')
+    # Get 1 more random name than needed, in case one collides with an already used one (unlikely).
+    rig_cmd = get_rig_command(needed_names+1, gender='male')
+    rig_names = parse_rig_output(run_command(rig_cmd))
+    unused_random_names = get_unused_names(rig_names, used_names_lc)
     if names_list:
-      print('---')
+      print('# '+' '.join(rig_cmd))
     for name in sorted(unused_random_names[:needed_names]):
       print(name)
 
@@ -117,10 +122,26 @@ def main(argv):
 
   if not args.rig and args.extra and args.num_extra > 0:
     extra_names = read_names_files(args.extra)
-    print('---')
+    print_files_header(args.extra)
     unused_extra_names = randomize(get_unused_names(extra_names, used_names_lc))
     for name in unused_extra_names[:args.num_extra]:
       print(name)
+
+
+def print_files_header(raw_paths):
+  paths = []
+  home_str = str(pathlib.Path.home())
+  for path in raw_paths:
+    path_str = str(path)
+    if path_str.startswith(home_str):
+      path_str = '~' + path_str[len(str(home_str)):]
+    paths.append(path_str)
+  if len(paths) == 1:
+    print(f'# {paths[0]}')
+  else:
+    print('#')
+    for names_path in paths:
+      print(names_path)
 
 
 def read_args_file(args_path):
@@ -182,31 +203,23 @@ def get_unused_names(names, used_names_lc):
   return unused_names
 
 
-def get_unused_random_names(num_names, used_names_lc, gender=None):
-  unused_random_names = []
-  while len(unused_random_names) < num_names:
-    for name in get_random_names(num_names+1, gender):
-      if name.lower() not in used_names_lc:
-        unused_random_names.append(name)
-        if len(unused_random_names) >= num_names:
-          break
-  return unused_random_names
-
-
-def get_random_names(num_names, gender=None):
-  for line_num, line in enumerate(run_rig(num_names, gender), 1):
-    if line_num % 5 == 1:
+def parse_rig_output(rig_output):
+  for line_num, line in enumerate(rig_output):
+    if line_num % 5 == 0:
       yield line
 
 
-def run_rig(num_names, gender=None):
+def get_rig_command(num_names, gender=None):
   if gender is None:
     gender_arg = []
   elif gender.startswith('m'):
     gender_arg = ['-m']
   elif gender.startswith('f'):
     gender_arg = ['-f']
-  command = ('rig', *gender_arg, '-c', str(num_names))
+  return ('rig', *gender_arg, '-c', str(num_names))
+
+
+def run_command(command):
   logging.info(f'Info: Running $ {" ".join(command)}')
   result = subprocess.run(command, encoding='utf8', stdout=subprocess.PIPE)
   return result.stdout.splitlines()
