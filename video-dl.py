@@ -25,7 +25,17 @@ assert sys.version_info.major >= 3, 'Python 3 required'
 #      the other has the audio. Not sure if you can select different qualities.
 
 DESCRIPTION = """Download and label a video using yt-dlp."""
-YOUTUBE_DL_ARGS = ['--no-mtime', '--add-metadata', '--xattrs']
+YT_DLP_OPTIONS = {
+  'cookies': {
+    'args': ('-b', '--cookies'),
+    'help': 'Netscape cookies file',
+  },
+  'cookies_from_browser': {
+    'args': ('--cookies-from-browser',),
+    'help': 'browser to get cookies from',
+  }
+}
+STATIC_YT_DLP_ARGS = ['--no-mtime', '--add-metadata', '--xattrs']
 VALID_CONVERSIONS = ['mp3', 'm4a', 'flac', 'aac', 'wav']
 SILENCE_PATH = pathlib.Path('~/.local/share/nbsdata/SILENCE').expanduser()
 SUPPORTED_SITES = {
@@ -33,11 +43,11 @@ SUPPORTED_SITES = {
     'domain':'youtube.com',
     'base_url': 'https://www.youtube.com/watch?v={id}',
     'qualities': {
-      '360':'18',
-      '640':'18',
+      '360':'134+139', # old: '18',
+      '640':'134+139',
       '480':'135+250',  # 80k audio, 480p video (might not be available anymore)
-      '720':'22', # This might've changed. At least for QDQo2lJht7Y, 22 is basically the same as 18.
-      '1280':'22',
+      '720':'136+140', # old: 22
+      '1280':'136+140',
     },
   },
   'vimeo': {
@@ -103,8 +113,6 @@ def make_argparser():
   parser.add_argument('-o', '--outdir', type=pathlib.Path, default=pathlib.Path('.'),
     help='Save the video to this directory.')
   parser.add_argument('-n', '--get-filename', action='store_true')
-  parser.add_argument('-b', '--cookies', type=pathlib.Path,
-    help='Netscape cookies file to pass to yt-dlp.')
   parser.add_argument('-c', '--convert-to', choices=VALID_CONVERSIONS,
     help='Give a file extension to convert the video to this audio format. The file will be named '
       '"{title}.{ext}".')
@@ -123,6 +131,8 @@ def make_argparser():
   parser.add_argument('-I', '--non-interactive', dest='interactive', default=True,
     action='store_const', const=False,
     help='Do not prompt the user for input. Proceed fully automatically.')
+  parser.add_argument('-S', '--ignore-silence', action='store_true',
+    help='Ignore the silence file.')
   parser.add_argument('-l', '--log', type=argparse.FileType('w'), default=sys.stderr,
     help='Print log messages to this file instead of to stderr. Warning: Will overwrite the file.')
   volume = parser.add_mutually_exclusive_group()
@@ -130,6 +140,13 @@ def make_argparser():
     default=logging.WARNING)
   volume.add_argument('-v', '--verbose', dest='volume', action='store_const', const=logging.INFO)
   volume.add_argument('-D', '--debug', dest='volume', action='store_const', const=logging.DEBUG)
+  ytdlp = parser.add_argument_group('yt-dlp arguments')
+  for info in YT_DLP_OPTIONS.values():
+    args = info['args']
+    kwargs = {}
+    if 'help' in info:
+      kwargs['help'] = info['help']
+    ytdlp.add_argument(*args, **kwargs)
   return parser
 
 
@@ -143,7 +160,7 @@ def main(argv):
   if not shutil.which(args.exe):
     fail(f'Error: {args.exe!r} command not found.')
 
-  if SILENCE_PATH.exists():
+  if SILENCE_PATH.exists() and not args.ignore_silence:
     fail(f'Error: Silence file exists: {str(SILENCE_PATH)!r}')
 
   if args.formats:
@@ -164,10 +181,19 @@ def main(argv):
         print(f'  {alias:>5s}: {qid}')
     return
 
+  yt_dlp_args = {}
+  for name, info in YT_DLP_OPTIONS.items():
+    value = getattr(args, name)
+    arg_str = info['args'][-1]
+    if value is True:
+      yt_dlp_args[arg_str] = True
+    elif value is not None:
+      yt_dlp_args[arg_str] = value
+
   if not args.playlist:
     result = download_video(
       args.url, args.quality, args.title, args.outdir, args.convert_to, args.posted,
-      args.interactive, args.get_filename, args.cookies, args.exe, args.generic
+      args.interactive, args.get_filename, yt_dlp_args, args.exe, args.generic
     )
     return result.returncode
   else:
@@ -185,7 +211,7 @@ def main(argv):
       url = get_url_from_id(vid_id, site)
       dl_args = (
         args.title, args.outdir, args.convert_to, args.posted, False,
-        args.get_filename, args.cookies, args.exe, args.generic
+        args.get_filename, yt_dlp_args, args.exe, args.generic
       )
       result = download_video(url, args.quality, *dl_args)
       if get_outcome(result) == 'quality':
@@ -207,7 +233,7 @@ def main(argv):
 
 
 def download_video(
-    url, quality, title, outdir, convert_to, posted, interactive, get_filename, cookies, exe,
+    url, quality, title, outdir, convert_to, posted, interactive, get_filename, yt_dlp_args, exe,
     generic=False
   ):
   site = get_site(url)
@@ -225,12 +251,12 @@ def download_video(
   )
   fmt_str = formatter.get_format_string()
 
-  end_args = get_end_args(url, fmt_str, outdir, qual_key, cookies, convert_to)
+  end_args = get_end_args(url, fmt_str, outdir, qual_key, convert_to, yt_dlp_args)
 
   if get_filename:
     cmd = [exe, '--get-filename'] + end_args
   else:
-    cmd = [exe] + YOUTUBE_DL_ARGS + end_args
+    cmd = [exe] + STATIC_YT_DLP_ARGS + end_args
     # Kludge to work around bug in dailymotion downloader.
     if site['name'] == 'dailymotion':
       cmd.remove('--add-metadata')
@@ -310,14 +336,17 @@ def get_quality_key(quality_arg, site):
   return None
 
 
-def get_end_args(url, fmt_str, outdir, qual_key, cookies, convert_to):
+def get_end_args(url, fmt_str, outdir, qual_key, convert_to, yt_dlp_args):
   end_args = ['-o', str(outdir/fmt_str), url]
   if qual_key:
     end_args = ['-f', qual_key] + end_args
-  if cookies:
-    end_args = ['--cookies', str(cookies)] + end_args
   if convert_to:
     end_args = ['--extract-audio', '--audio-format', convert_to] + end_args
+  for arg, value in yt_dlp_args.items():
+    if value is True:
+      end_args.append(arg)
+    else:
+      end_args.extend((arg, value))
   return end_args
 
 
@@ -360,6 +389,10 @@ class Formatter:
 
   def format_generic(self):
     return '.%(ext)s'
+
+  def _format_posted_url(self):
+    simple_url = self.simplify_url(self.url)
+    return f' [posted %(upload_date)s] [src {simple_url}].%(ext)s'
 
   def format_youtube(self):
     uploader_id = get_format_value(self.url, 'uploader_id', self.exe)
@@ -409,16 +442,10 @@ class Formatter:
     escaped_url = self.simplify_url(self.url)
     return f' [posted %(upload_date)s] [src {escaped_url}].%(ext)s'
 
-  def format_instagram(self):
-    return self._format_instatwit()
+  def format_x(self):
+    return self.format_twitter()
 
   def format_twitter(self):
-    return self._format_instatwit()
-
-  def format_x(self):
-    return self._format_instatwit()
-
-  def _format_instatwit(self):
     upload_date = get_format_value(self.url, 'upload_date', self.exe)
     if upload_date == 'NA':
       if self.posted:
@@ -430,15 +457,14 @@ class Formatter:
     domain = self.site['domain']
     return f' {posted_fmt}[src {domain}%%2F%(uploader_id)s] [id %(id)s].%(ext)s'
 
+  def format_instagram(self):
+    return self._format_posted_url()
+
   def format_dailymotion(self):
-    return ' '+self._format_posted_url()
+    return self._format_posted_url()
 
   def format_patreon(self):
-    return ' '+self._format_posted_url()
-
-  def _format_posted_url(self):
-    simple_url = self.simplify_url(self.url)
-    return f'[posted %(upload_date)s] [src {simple_url}].%(ext)s'
+    return self._format_posted_url()
 
   def simplify_url(self, url):
     parts = urllib.parse.urlparse(url)
