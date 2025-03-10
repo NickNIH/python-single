@@ -60,8 +60,11 @@ def main(argv):
     start_count = get_current_count(args.command, args.field, args.eval)
 
   start = int(args.start_time)
-  ratio = start_count/args.goal
-  print(f'Initial time: {start} | Initial count: {start_count} ({ratio:0.1%}) | Goal: {args.goal}')
+  if args.goal > start_count:
+    ratio_str = f' ({start_count/args.goal:0.1%})'
+  else:
+    ratio_str = ''
+  print(f'Initial time: {start} | Initial count: {start_count}{ratio_str} | Goal: {args.goal}')
 
   watch_progress(
     args.start_time, start_count, args.goal, args.command, args.field, args.pause, args.eval,
@@ -124,7 +127,11 @@ def parse_result(result_str, field):
 def format_status(current_count, last_count, goal, now, remaining):
   diff = current_count - last_count
   sign = '' if diff < 0 else '+'
-  current_str = f'Current: {current_count} ({sign}{diff}, {current_count/goal:0.1%})'
+  if goal > last_count:
+    ratio_str = f', {current_count/goal:0.1%}'
+  else:
+    ratio_str = ''
+  current_str = f'Current: {current_count} ({sign}{diff}{ratio_str})'
   if remaining == float('inf'):
     return f'{current_str} | ETA: ??? (count has decreased)'
   else:
