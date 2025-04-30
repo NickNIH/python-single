@@ -7,14 +7,12 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.parse
 assert sys.version_info.major >= 3, 'Python 3 required'
 
 # Downloading the "Save" playlists:
-# - these will sit for a while looking like they're doing nothing, but that's because
-#   (for some reason) youtube-dl takes a while download the playlist ids.
-# $ "$HOME/bin/video-dl.py" --playlist --check-existing "$HOME/Videos/Youtube" --quality 360 --outdir "$HOME/Videos/Youtube/0nsorted/360" 'https://www.youtube.com/playlist?list=PLG3QUVI_eBaOYc-GaSKIX4iH8q_wjcLOk'
-# $ "$HOME/bin/video-dl.py" --playlist --check-existing "$HOME/Videos/Youtube" --quality 720 --outdir "$HOME/Videos/Youtube/0nsorted/720" 'https://www.youtube.com/playlist?list=PLG3QUVI_eBaOV3xuHaltuqYuINP2pyuMB'
+# See ~/Videos/Youtube/0nsorted/00README.txt
 
 #TODO: WARC??
 #      Looks like there's no WARC feature as of June 2020, though IA has requested the feature:
@@ -118,6 +116,9 @@ def make_argparser():
       '"{title}.{ext}".')
   parser.add_argument('-p', '--playlist', action='store_true',
     help='The url is for a playlist. Download all videos from it.')
+  parser.add_argument('-w', '--wait', type=float, default=1,
+      help='Wait this many seconds between downloads. Only used when downloading a --playlist. '
+        'Default: %(default)s.')
   parser.add_argument('-C', '--check-existing', type=pathlib.Path,
     help='Check whether the video has already been downloaded by looking in this directory. '
       "If it's already been downloaded, skip it. Currently this only works for playlists. "
@@ -221,6 +222,7 @@ def main(argv):
         result = download_video(url, None, *dl_args)
       if result.returncode != 0:
         failures.append(vid_id)
+      time.sleep(args.wait)
     for status, vid_id in parse_stderr(stderr):
       failures.append(vid_id)
     if failures:
@@ -230,6 +232,9 @@ def main(argv):
         plural = 's'
       logging.error(f'Failed to download {len(failures)} video{plural}: {", ".join(failures)}')
       return 1
+    else:
+      logging.info('All videos downloaded successfully.')
+      return 0
 
 
 def download_video(
