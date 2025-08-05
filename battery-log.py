@@ -68,7 +68,7 @@ def get_device():
   device = None
   for line in run_command('upower', '--enumerate'):
     base = os.path.basename(line)
-    if base.startswith('battery_'):
+    if base.startswith('battery_') and 'hidpp' not in base:
       if device is None:
         device = line
       else:
