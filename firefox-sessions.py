@@ -13,9 +13,11 @@ import configparser
 assert sys.version_info.major >= 3, 'Python 3 required'
 
 DEFAULT_FIREFOX_DIR = pathlib.Path('~/.mozilla/firefox').expanduser()
+SNAP_FIREFOX_DIR = pathlib.Path('~/snap/firefox/common/.mozilla/firefox').expanduser()
 
 DESCRIPTION = """Read and manipulate browsing sessions from Firefox.
-Firefox's sessions can be found in the profile folders under ~/.mozilla/firefox.
+Firefox's sessions can be found in the profile folders under ~/.mozilla/firefox or
+~/snap/firefox/common/.mozilla/firefox.
 They're found in the sessionstore-backups folder in the profile folder.
 In that folder, you'll find (as of Firefox 59) recovery.jsonlz4 and previous.jsonlz4.
 The former is saved periodically during your browsing session, while the latter should be a
@@ -102,7 +104,12 @@ def main(argv):
   elif args.session:
     session_path = pathlib.Path(args.session)
   else:
-    profile_dir = find_profile(DEFAULT_FIREFOX_DIR)
+    for firefox_dir in DEFAULT_FIREFOX_DIR, SNAP_FIREFOX_DIR:
+      if firefox_dir.is_dir():
+        break
+    if not firefox_dir.is_dir():
+      fail(f'Error: Could not find Firefox directory {str(firefox_dir)!r}')
+    profile_dir = find_profile(firefox_dir)
     session_path = profile_dir/'sessionstore-backups/recovery.jsonlz4'
   if args.print_path:
     print(session_path)
@@ -397,8 +404,6 @@ def get_tabs(window):
 def find_profile(firefox_dir=DEFAULT_FIREFOX_DIR, profiles_ini_filename='profiles.ini'):
   """Find the default Firefox profile directory by reading the profiles.ini file.
   If no directory can be successfully found, return None."""
-  if not firefox_dir.is_dir():
-    fail(f'Error: Could not find Firefox directory {str(firefox_dir)!r}')
   profiles_ini = firefox_dir/profiles_ini_filename
   if not profiles_ini.is_file():
     fail(f'Error: Could not find profiles.ini file {str(profiles_ini)!r}')
@@ -413,12 +418,15 @@ def find_profile(firefox_dir=DEFAULT_FIREFOX_DIR, profiles_ini_filename='profile
 
 
 def find_section_by_install(config):
+  default = None
   for section in config.sections():
     if section.startswith('Install'):
       if 'Default' in config[section]:
         default = config[section].get('Default')
       else:
         return None
+  if default is None:
+    return None
   for section in config.sections():
     path = config[section].get('Path')
     if path == default:
