@@ -34,7 +34,7 @@ FIELDS.append('lastping')
 FIELDS.append('pings')
 FIELDS.append('worktime')
 FIELDS.append('disk')
-FIELDS.append('temp')
+# FIELDS.append('temp')
 FIELDS.append('ssid')
 FIELDS.append('timestamp')
 
@@ -239,16 +239,20 @@ class Status():
     if cmd_output is None:
       return
     frees = []
-    for line in cmd_output.splitlines():
+    for line in sorted(cmd_output.splitlines()):
       fields = line.split()
       filesystem = fields[0]
       free = fields[3]
       mount = fields[5]
-      if not filesystem.startswith('/dev/'):
+      #TODO: Figure out a more generalizable way to specify the ZFS volumes to include.
+      if not (
+        filesystem.startswith('/dev/')
+        or filesystem.startswith('rpool/USERDATA/home_') or filesystem.startswith('bpool/BOOT/')
+      ):
         continue
-      if mount.startswith('/snap/') or mount == '/boot' or mount.startswith('/boot'):
+      if mount.startswith('/snap/') or mount == '/boot/efi':
         continue
-      if filesystem.startswith('/dev/sr'):
+      if filesystem.startswith('/dev/mapper/keystore-'):
         continue
       frees.append(free)
     if frees:
