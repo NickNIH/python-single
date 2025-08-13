@@ -72,7 +72,7 @@ def main(argv):
 
   # Read accounts.txt file.
   relays = collections.defaultdict(list)
-  with open(args.accounts_path, 'rU') as accounts_file:
+  with open(args.accounts_path) as accounts_file:
     for entry in accountslib.parse(accounts_file):
       for account in entry.accounts.values():
         for section in account.values():
@@ -94,6 +94,8 @@ def main(argv):
                   entries[basename].append(entry.name)
                 elif args.relay and domain == 'relay.firefox.com':
                   relays[value.value].append(entry.name)
+
+  print(f'Found {len(basenames)} basenames:')
 
   # Print all the used combinations.
   least_used = None
