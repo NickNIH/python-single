@@ -34,7 +34,7 @@ FIELDS.append('lastping')
 FIELDS.append('pings')
 # FIELDS.append('worktime')
 FIELDS.append('disk')
-FIELDS.append('zfs')
+FIELDS.append('mem')
 # FIELDS.append('temp')
 FIELDS.append('ssid')
 FIELDS.append('timestamp')
@@ -45,10 +45,10 @@ FIELDS_META = {
   'pings':     {'priority':10, 'max_length':10},
   'worktime':  {'priority':30, 'max_length':16},
   'disk':      {'priority':50, 'max_length':20},
-  'zfs':       {'priority':55, 'max_length':15},
+  'mem':       {'priority':55, 'max_length':15},
   'temp':      {'priority':60, 'max_length':5},
   'ssid':      {'priority':40, 'truncate_length':9},
-  'timestamp': {'priority':80, 'max_length':10},
+  'timestamp': {'priority':100, 'max_length':10},
 }
 
 DESCRIPTION = """Gather system info and format it for display in indicator-sysmonitor."""
@@ -454,7 +454,31 @@ class Status():
     message = ': '.join(fields[1:])
     return message
 
+  def get_mem(self):
+    free_str = self.get_free_mem()
+    zfs_str = self.get_zfs()
+    fields = [free_str, zfs_str]
+    return ', '.join(f for f in fields if f is not None)
+
+  def get_free_mem(self):
+    output = run_command(('free', '-m'))
+    if output is None:
+      return None
+    for line in output.splitlines():
+      fields = line.split()
+      if fields[0] == 'Mem:':
+        raw_str = fields[3]
+        try:
+          free_mb = int(raw_str)
+        except ValueError:
+          logging.info(f'Invalid free memory value: {raw_str!r}')
+          return None
+    free_gb = free_mb/1024
+    free_str = num_to_str(free_gb, 1)
+    return f'{free_str}G F'
+
   def get_zfs(self):
+    # Get ZFS memory usage (ARC size).
     stats_path = pathlib.Path('/proc/spl/kstat/zfs/arcstats')
     if not stats_path.is_file():
       logging.info(f'No arcstats file at {str(stats_path)}')
@@ -463,24 +487,27 @@ class Status():
       for line in stats_file:
         fields = line.split()
         if fields[0] == 'size':
-          size_str = fields[2]
+          raw_str = fields[2]
           try:
-            size_bytes = int(size_str)
+            zfs_bytes = int(raw_str)
           except ValueError:
-            logging.info(f'Invalid ZFS ARC size value: {size_str!r}')
+            logging.info(f'Invalid ZFS ARC size value: {raw_str!r}')
             return None
-    size_gb = size_bytes/1024/1024/1024
-    if round(size_gb,1) == round(size_gb):
-      size_str = f'{round(size_gb)}'
-    else:
-      size_str = f'{size_gb:0.1f}'
-    return f'{size_str}G Z'
-
+    zfs_gb = zfs_bytes/1024/1024/1024
+    zfs_str = num_to_str(zfs_gb, 1)
+    return f'{zfs_str}G Z'
 
 class StatusException(Exception):
   def __init__(self, message):
     self.message = message
     self.args = (message,)
+
+
+def num_to_str(num, decimals):
+  if round(num,1) == round(num):
+    return str(round(num))
+  else:
+    return str(round(num, decimals))
 
 
 def truncate_str(string, max_length):
