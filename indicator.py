@@ -32,8 +32,9 @@ FIELDS = []
 FIELDS.append('wifilogin')
 FIELDS.append('lastping')
 FIELDS.append('pings')
-FIELDS.append('worktime')
+# FIELDS.append('worktime')
 FIELDS.append('disk')
+FIELDS.append('zfs')
 # FIELDS.append('temp')
 FIELDS.append('ssid')
 FIELDS.append('timestamp')
@@ -44,6 +45,7 @@ FIELDS_META = {
   'pings':     {'priority':10, 'max_length':10},
   'worktime':  {'priority':30, 'max_length':16},
   'disk':      {'priority':50, 'max_length':20},
+  'zfs':       {'priority':55, 'max_length':15},
   'temp':      {'priority':60, 'max_length':5},
   'ssid':      {'priority':40, 'truncate_length':9},
   'timestamp': {'priority':80, 'max_length':10},
@@ -451,6 +453,28 @@ class Status():
       return None
     message = ': '.join(fields[1:])
     return message
+
+  def get_zfs(self):
+    stats_path = pathlib.Path('/proc/spl/kstat/zfs/arcstats')
+    if not stats_path.is_file():
+      logging.info(f'No arcstats file at {str(stats_path)}')
+      return None
+    with stats_path.open() as stats_file:
+      for line in stats_file:
+        fields = line.split()
+        if fields[0] == 'size':
+          size_str = fields[2]
+          try:
+            size_bytes = int(size_str)
+          except ValueError:
+            logging.info(f'Invalid ZFS ARC size value: {size_str!r}')
+            return None
+    size_gb = size_bytes/1024/1024/1024
+    if round(size_gb,1) == round(size_gb):
+      size_str = f'{round(size_gb)}'
+    else:
+      size_str = f'{size_gb:0.1f}'
+    return f'{size_str}G Z'
 
 
 class StatusException(Exception):
