@@ -89,14 +89,17 @@ def main(argv):
         run_stats = json.load(stats_log_file)
     except json.decoder.JSONDecodeError as error:
       with STATS_LOG.open('r') as stats_log_file:
-        logging.error('Error: Problem loading stats file "{}":\n'
-                      '{}\nFile contents:\n{}'.format(STATS_LOG, error, stats_log_file.read(1024)))
+        logging.error(
+          'Error: Problem loading stats file "%s":\n%s\nFile contents:\n%s',
+          STATS_LOG, error, stats_log_file.read(1024)
+        )
     except OSError:
-      logging.info('Info: "{}" could not be found or read. Using default data.'.format(STATS_LOG))
+      logging.info('"%s" could not be found or read. Using default data.', STATS_LOG)
 
   fitting_fields = status.get_fitting_fields(max_length=args.max_length)
-  stable_fields = status.get_stable_fields(run_stats.get('fitting_fields'),
-                                           run_stats.get('stable_fields'))
+  stable_fields = status.get_stable_fields(
+    run_stats.get('fitting_fields'), run_stats.get('stable_fields')
+  )
   status.out_str, width = status.format_and_truncate_output_string(stable_fields, args.max_length)
   print(status.out_str)
 
@@ -116,12 +119,12 @@ class Status():
   def get_fitting_fields(self, max_length=None):
     if self.statuses is None:
       self.statuses = self.get_statuses()
-    logging.info('Info: Max length: {}'.format(max_length))
+    logging.info('Max length: %d', max_length)
     self.fitting_fields = self.fields
     self.out_str, width = self.format_and_truncate_output_string(self.fields, max_length=max_length)
     # If it's too long, drop fields until it fits.
     if max_length is not None and width > max_length:
-      logging.info('Info: Still too long. Trying to drop fields..')
+      logging.info('Still too long. Trying to drop fields..')
       self.fitting_fields, self.out_str = self.drop_fields_until_fit(self.fields, max_length)
     return self.fitting_fields
 
@@ -141,34 +144,42 @@ class Status():
       return self.fitting_fields
     # If we want to display the same fields as were shown last time, we're all good.
     if self.fitting_fields == prev_stable:
-      logging.debug('Debug: Fitting fields same as last run\'s stable fields.\n'
-                    '       Going with our fitting fields.')
+      logging.debug(
+        "Fitting fields same as last run's stable fields.\n       Going with our fitting fields."
+      )
       return self.fitting_fields
     # If we want to display a different set of fields than we showed last time, but it's the same
     # set we wanted to display last time, that means the change is sticky. Time to switch to it.
     if self.fitting_fields == prev_fitting:
-      logging.info('Info: Fitting fields different from last run\'s stable fields but same as its '
-                   'fitting fields.\n'
-                   '      Going with our fitting fields.')
+      logging.info(
+        "Fitting fields different from last run's stable fields but same as its fitting fields.\n"
+        '      Going with our fitting fields.'
+      )
       return self.fitting_fields
     # But if we want to display something different from both (something new), then for now let's
     # stick with what we did last time and wait to see if the change is persistent. If we want to
     # display these fields twice in a row, then it's not just transient and we should switch to it.
-    logging.info('Info: Fitting fields differed from last run\'s fitting and stable fields.\n'
-                 '      Going with last run\'s stable fields.')
+    logging.info(
+      "Fitting fields differed from last run's fitting and stable fields.\n"
+      "      Going with last run's stable fields."
+    )
     return prev_stable
 
   def drop_fields_until_fit(self, fields, max_length):
     priorities = sorted(FIELDS_META.keys(), key=lambda field: -FIELDS_META[field]['priority'])
     fitting_fields = fields
     for field_to_drop in priorities:
-      logging.info('Info:   Dropping "{}"..'.format(field_to_drop))
+      logging.info('  Dropping "%s"..', field_to_drop)
       fitting_fields.remove(field_to_drop)
       out_str = self.format_output_string(fitting_fields, truncate=True)
       width = get_display_width(out_str)
-      logging.info('Info: Length: {} after dropping "{}".'.format(width, field_to_drop))
+      logging.info(
+        'Length: %d after dropping "%s". %d fields remain.',
+        width, field_to_drop, len(fitting_fields)
+      )
       if width < max_length:
-        logging.info('Info: Output is now short enough.')
+        fields_str = ', '.join(fitting_fields)
+        logging.info('Output is now short enough with: %s', fields_str)
         break
       if len(fitting_fields) == 0:
         logging.warning('Warning: Failed to shorten output enough.')
@@ -179,12 +190,12 @@ class Status():
     out_str = self.format_output_string(fields, truncate=False)
     width = get_display_width(out_str)
     if max_length is not None and width > max_length:
-      logging.info('Info: Too long. Trying to truncate..')
+      logging.info('Too long. Trying to truncate..')
       out_str = self.format_output_string(fields, truncate=True)
       width = get_display_width(out_str)
-      logging.info('Info: Length: {} after truncation'.format(width))
+      logging.info('Length: %d after truncation', width)
     else:
-      logging.info('Info: Length: {}'.format(width))
+      logging.info('Length: %d', width)
     return out_str, width
 
   def format_output_string(self, fields, truncate=False):
@@ -204,9 +215,9 @@ class Status():
     for field in self.fields:
       status = self.get_status(field)
       if status is None:
-        logging.info(f'Info: None status from get_{field}()')
+        logging.info('None status from get_%s()', field)
       elif status == '':
-        logging.info(f"Info: Empty string '' from get_{field}()")
+        logging.info("Empty string '' from get_%s()", field)
       statuses[field] = status
     return statuses
 
@@ -365,9 +376,9 @@ class Status():
     age = int(time.time()) - timestamp
     age_str = human_time(age)
     if age < timeout:
-      lastping = '{} / {} ago'.format(latency_str, age_str)
+      lastping = f'{latency_str} / {age_str} ago'
     else:
-      lastping = 'N/A ms / {} ago'.format(age_str)
+      lastping = f'N/A ms / {age_str} ago'
     # If ping is old, and upmonitor doesn't say it's offline, assume it's frozen.
     if age > timeout and pings != 'OFFLINE':
       pings = 'STALLED'
@@ -471,7 +482,7 @@ class Status():
         try:
           free_mb = int(raw_str)
         except ValueError:
-          logging.info(f'Invalid free memory value: {raw_str!r}')
+          logging.info('Invalid free memory value: %s', repr(raw_str))
           return None
     free_gb = free_mb/1024
     free_str = num_to_str(free_gb, 1)
@@ -481,7 +492,7 @@ class Status():
     # Get ZFS memory usage (ARC size).
     stats_path = pathlib.Path('/proc/spl/kstat/zfs/arcstats')
     if not stats_path.is_file():
-      logging.info(f'No arcstats file at {str(stats_path)}')
+      logging.info('No arcstats file at %s', str(stats_path))
       return None
     with stats_path.open() as stats_file:
       for line in stats_file:
@@ -491,7 +502,7 @@ class Status():
           try:
             zfs_bytes = int(raw_str)
           except ValueError:
-            logging.info(f'Invalid ZFS ARC size value: {raw_str!r}')
+            logging.info('Invalid ZFS ARC size value: %s', repr(raw_str))
             return None
     zfs_gb = zfs_bytes/1024/1024/1024
     zfs_str = num_to_str(zfs_gb, 1)
