@@ -166,7 +166,7 @@ class Status():
     return prev_stable
 
   def drop_fields_until_fit(self, fields, max_length):
-    priorities = sorted(FIELDS_META.keys(), key=lambda field: -FIELDS_META[field]['priority'])
+    priorities = sorted(fields, key=lambda field: -FIELDS_META[field]['priority'])
     fitting_fields = fields
     for field_to_drop in priorities:
       logging.info('  Dropping "%s"..', field_to_drop)
