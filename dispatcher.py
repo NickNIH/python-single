@@ -6,8 +6,10 @@ import logging
 import pathlib
 import sys
 import yaml
+from typing import Optional
 assert sys.version_info.major >= 3, 'Python 3 required'
 
+DATA_DIR_DEFAULT = pathlib.Path('~/.local/share/nbsdata/dispatcher').expanduser()
 PERIODS = collections.OrderedDict(
   (
     ('min', {'dt':lambda dt: dt.minute}),
@@ -33,7 +35,7 @@ def make_argparser():
       'option multiple times.')
   options.add_argument('-p', '--precision', type=int,
     help='Time precision of execution. How many minutes since the last time this was executed? '
-      'Required for any command with a #?when parameter. Currently only applied to the #?when hour '
+      'Required for any command with a ?when parameter. Currently only applied to the ?when hour '
       'and minute.')
   options.add_argument('-h', '--help', action='help',
     help='Print this argument help text and exit.')
@@ -55,11 +57,11 @@ def main(argv):
 
   logging.basicConfig(stream=args.log, level=args.volume, format='%(message)s')
 
-  static_params = {'whitelist':[]}
+  settings = {'whitelist':[], 'data_dir':DATA_DIR_DEFAULT}
   if args.config:
-    read_config(args.config, static_params)
+    read_config(args.config, settings)
   for path in args.whitelist:
-    static_params['whitelist'].append(path.resolve())
+    settings['whitelist'].append(path.resolve())
 
   for lines in chunk_input(args.infile):
     # Parse the chunk.
@@ -69,7 +71,7 @@ def main(argv):
       logging.error(error)
       continue
     # Include static params, but allow them to be overridden by ones from the current chunk.
-    for key, value in static_params.items():
+    for key, value in settings.items():
       if key not in params:
         params[key] = value
     # Allow deactivating commands easily.
@@ -98,7 +100,7 @@ def chunk_input(lines):
   chunk_lines = []
   for line_raw in lines:
     line = line_raw.rstrip('\r\n')
-    if line.startswith('#!'):
+    if line.startswith('!'):
       if chunk_lines:
         yield chunk_lines
       chunk_lines = []
@@ -115,7 +117,7 @@ def parse_chunk(chunk_lines):
   content = []
   params = {}
   for line in chunk_lines[1:]:
-    if not content and line.startswith('#?'):
+    if not content and line.startswith('?'):
       param_type, param = parse_params(line)
       params[param_type] = param
     else:
@@ -124,8 +126,8 @@ def parse_chunk(chunk_lines):
 
 
 def parse_command(command_line):
-  assert command_line.startswith('#!'), command_line
-  fields = command_line[2:].split()
+  assert command_line.startswith('!'), command_line
+  fields = command_line[1:].split()
   command = fields[0]
   args = fields[1:]
   if command not in COMMANDS:
@@ -134,8 +136,8 @@ def parse_command(command_line):
 
 
 def parse_params(params_line):
-  assert params_line.startswith('#?'), params_line
-  fields = params_line[2:].split()
+  assert params_line.startswith('?'), params_line
+  fields = params_line[1:].split()
   param_type = fields[0]
   param_args = fields[1:]
   if param_type == 'when':
@@ -223,6 +225,51 @@ def do_cat(args, content, params):
           print(line, file=file)
     except OSError as error:
       logging.error(f'Error: Failed writing to file {str(path)!r}: {error}')
+
+
+def do_shutdown(args, content, params):
+  if args:
+    # Wait the specified amount of time.
+    wait = parse_minutes(args[0])
+    if wait is None:
+      logging.error(f'Error: Invalid arg to shutdown command (minutes not an integer): {args[0]!r}')
+      return False
+    shutdown_path = params['data_dir']/'shutdown.tsv'
+    #TODO: Check if there's already a file noting the shutdown request.
+    #      If not, create one with the time it was noticed and the wait time.
+    #      If it already exists, check if we're past the shutdown time.
+    #      If so, continue out of this conditional (toward the shutdown).
+  #TODO: Show a GUI warning that it will shut down in X minutes.
+  #      That should take care of the case where I boot the computer back up but haven't yet taken
+  #      down the shutdown request.
+
+
+def parse_minutes(min_str: str) -> Optional[int]:
+  try:
+    minutes = int(min_str)
+  except ValueError:
+    return None
+  return minutes * 60
+
+
+def shutdown():
+  # pydbus is required: `sudo apt install python3-pydbus` on Ubuntu 24.04 (also installs gi)
+  # This is the only way (I know of) to shut down without sudo.
+  import gi
+  import pydbus
+  # https://stackoverflow.com/questions/23013274/shutting-down-computer-linux-using-python/23013969#23013969
+  bus = pydbus.SystemBus()
+  try:
+    proxy = bus.get('org.freedesktop.login1', '/org/freedesktop/login1')
+  except (ValueError, gi.repository.GLib.GError) as error:
+    logging.error(f'Error: Failed to find the org.freedesktop.login1 service: {error}')
+    return False
+  logging.info('Shutting down.')
+  if proxy.CanPowerOff():
+    proxy.PowerOff(False)
+  else:
+    logging.error('Error: System does not support shutting down.')
+    return False
 
 
 COMMANDS = {
