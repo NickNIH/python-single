@@ -4,9 +4,10 @@ import collections
 import datetime
 import logging
 import pathlib
+import subprocess
 import sys
+import time
 import yaml
-from typing import Optional
 assert sys.version_info.major >= 3, 'Python 3 required'
 
 DATA_DIR_DEFAULT = pathlib.Path('~/.local/share/nbsdata/dispatcher').expanduser()
@@ -228,28 +229,158 @@ def do_cat(args, content, params):
 
 
 def do_shutdown(args, content, params):
+  shutdown_path = params['data_dir']/"shutdown.tsv"
+  delay_seconds = None
+
   if args:
-    # Wait the specified amount of time.
-    wait = parse_minutes(args[0])
-    if wait is None:
-      logging.error(f'Error: Invalid arg to shutdown command (minutes not an integer): {args[0]!r}')
+    # Check if there's already a file noting the shutdown request.
+    # If not, create one with the time it was noticed and the wait time.
+    # If it already exists, check if we're past the shutdown time.
+    # If so, continue out of this conditional (toward the shutdown).
+    try:
+      delay_seconds = parse_time(args[0])
+    except ValueError:
+      logging.error(
+        f'Error: Invalid arg to shutdown command (delay not MM or HH:MM): {args[0]!r}'
+      )
       return False
-    shutdown_path = params['data_dir']/'shutdown.tsv'
-    #TODO: Check if there's already a file noting the shutdown request.
-    #      If not, create one with the time it was noticed and the wait time.
-    #      If it already exists, check if we're past the shutdown time.
-    #      If so, continue out of this conditional (toward the shutdown).
-  #TODO: Show a GUI warning that it will shut down in X minutes.
-  #      That should take care of the case where I boot the computer back up but haven't yet taken
-  #      down the shutdown request.
 
+    now_ts = int(time.time())
+    noticed_ts = None
+    existing_delay = None
+    new_request = False
 
-def parse_minutes(min_str: str) -> Optional[int]:
+    if shutdown_path.exists():
+      try:
+        with shutdown_path.open('r') as file:
+          line = file.readline().strip()
+        if line:
+          noticed_str, delay_str = line.split('\t')
+          noticed_ts = int(noticed_str)
+          existing_delay = int(delay_str)
+        else:
+          logging.warning(
+            'Warning: Empty shutdown request file '
+            f'{str(shutdown_path)!r}. Overwriting with new request.'
+          )
+      except (OSError, ValueError) as error:
+        logging.error(
+          f'Error: Failed to read existing shutdown request file {str(shutdown_path)!r}: {error}'
+        )
+
+    # If there was no valid existing request, or the existing request used a
+    # different delay, treat this as a new request and overwrite the file.
+    if noticed_ts is None or existing_delay != delay_seconds:
+      new_request = True
+      noticed_ts = now_ts
+      try:
+        shutdown_path.parent.mkdir(parents=True, exist_ok=True)
+        with shutdown_path.open('w') as file:
+          print(noticed_ts, delay_seconds, sep='\t', file=file)
+      except OSError as error:
+        logging.error(
+          'Error: Failed to write shutdown request file '
+          f'{str(shutdown_path)!r}: {error}'
+        )
+
+    # Show a warning that it will shut down after the requested delay.
+    # That should take care of the case where I boot the computer back up but haven't yet taken
+    # down the shutdown request.
+    elapsed = now_ts - noticed_ts
+    if elapsed < delay_seconds:
+      remaining = max(int(delay_seconds - elapsed), 0)
+      # Always log the alert; only show GUI alerts for new requests.
+      show_shutdown_alert(remaining, log=True, gui=new_request)
+      return
+
+  # Either no wait was requested or we've passed the shutdown time.
+
+  show_shutdown_alert(0, log=True, gui=True)
+
+  # Best-effort cleanup of the shutdown request file.
   try:
-    minutes = int(min_str)
-  except ValueError:
-    return None
-  return minutes * 60
+    if shutdown_path.exists():
+      shutdown_path.unlink()
+  except OSError as error:
+    logging.error(f'Error: Failed to remove shutdown request file {str(shutdown_path)!r}: {error}')
+
+  shutdown()
+
+
+def show_shutdown_alert(remaining_seconds: int, *, log: bool, gui: bool):
+  """Send shutdown alerts based on remaining time.
+  `remaining_seconds` is the remaining delay until shutdown.
+  `log` controls logging the constructed message.
+  `gui` controls sending desktop notifications.
+  """
+
+  now = datetime.datetime.now()
+
+  if remaining_seconds > 0:
+    minutes = (remaining_seconds + 59)//60
+    shutdown_time = now + datetime.timedelta(seconds=remaining_seconds)
+    shutdown_time_str = shutdown_time.strftime('%H:%M')
+    message = (
+      f'System will shut down at {shutdown_time_str} '
+      f'(in {minutes} minute' + ('s' if minutes != 1 else '') + ').'
+    )
+  else:
+    message = 'System is shutting down now.'
+
+  if log:
+    logging.info(message)
+
+  if not gui:
+    return
+
+  # Try to send a desktop notification via notify-send.
+  cmd: tuple[str,...] = ('notify-send', 'Shutdown requested', message)
+  try:
+    subprocess.run(cmd, check=False)
+  except (FileNotFoundError, OSError) as error:
+    logging.error(f'Error: notify-send failed: {error}')
+
+  # Also try to show a dialog via zenity.
+  cmd = ('zenity', '--info', '--title', 'Shutdown requested', '--text', message)
+  try:
+    subprocess.Popen(
+      cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+      start_new_session=True
+    )
+  except (FileNotFoundError, OSError) as error:
+    logging.error(f'Error: zenity failed: {error}')
+
+
+def parse_time(min_str: str) -> int:
+  """Parse a delay string as minutes.
+  Accepts either "MM" (minutes) or "HH:MM" (hours and minutes).
+  Returns the delay in seconds.
+  Raises ValueError on parse failure.
+  """
+  if ':' in min_str:
+    parts = min_str.split(':', 1)
+    if len(parts) != 2:
+      raise ValueError(f'Invalid time string (expected HH:MM): {min_str!r}')
+    hours_str, minutes_str = parts
+    try:
+      hours = int(hours_str)
+    except ValueError as error:
+      raise ValueError(f'Invalid hour value in time string: {min_str!r}') from error
+    try:
+      minutes = int(minutes_str)
+    except ValueError as error:
+      raise ValueError(f'Invalid minute value in time string: {min_str!r}') from error
+    if hours < 0 or minutes < 0:
+      raise ValueError(f'Negative time not allowed: {min_str!r}')
+    total_minutes = hours * 60 + minutes
+  else:
+    try:
+      total_minutes = int(min_str)
+    except ValueError as error:
+      raise ValueError(f'Invalid minute value in time string: {min_str!r}') from error
+    if total_minutes < 0:
+      raise ValueError(f'Negative time not allowed: {min_str!r}')
+  return total_minutes * 60
 
 
 def shutdown():
@@ -275,6 +406,7 @@ def shutdown():
 COMMANDS = {
   'echo':do_echo,
   'cat':do_cat,
+  'shutdown':do_shutdown,
 }
 
 
