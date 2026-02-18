@@ -2,11 +2,14 @@
 import argparse
 import collections
 import datetime
+import io
 import logging
 import pathlib
 import subprocess
 import sys
 import time
+import urllib.error
+import urllib.request
 import yaml
 assert sys.version_info.major >= 3, 'Python 3 required'
 
@@ -23,12 +26,16 @@ PERIODS = collections.OrderedDict(
 
 DESCRIPTION = """Take actions based on the content of a simple input file."""
 
+USER_AGENT = 'dispatcher/1.0'
+
 
 def make_argparser():
   parser = argparse.ArgumentParser(add_help=False, description=DESCRIPTION)
   options = parser.add_argument_group('Options')
   options.add_argument('infile', type=argparse.FileType('r'), default=sys.stdin, nargs='?',
     help='Input file. Omit to read from stdin.')
+  options.add_argument('-u', '--url',
+    help='Read input from this url instead of a file.')
   options.add_argument('-c', '--config', type=argparse.FileType('r'),
     help='Config file for parameters and options.')
   options.add_argument('-w', '--whitelist', type=pathlib.Path, action='append', default=[],
@@ -64,7 +71,9 @@ def main(argv):
   for path in args.whitelist:
     settings['whitelist'].append(path.resolve())
 
-  for lines in chunk_input(args.infile):
+  input_stream = get_input_stream(args.infile, args.url)
+
+  for lines in chunk_input(input_stream):
     # Parse the chunk.
     try:
       command, chunk_args, params, content = parse_chunk(lines)
@@ -95,6 +104,25 @@ def read_config(config_file, params):
       if not path.is_absolute():
         logging.error(f'Error: Config file whitelist path not absolute: {str(path)!r}')
       params['whitelist'].append(path)
+
+
+def get_input_stream(infile, url):
+  """Return a file-like object to read input from.
+  Uses the url if given; otherwise uses the infile/stdin argument."""
+  if url is None:
+    return infile
+  else:
+    try:
+      request = urllib.request.Request(url, headers={'User-Agent':USER_AGENT})
+      with urllib.request.urlopen(request) as response:
+        encoding = response.headers.get_content_charset()
+        if encoding is None:
+          encoding = 'utf-8'
+        text = response.read().decode(encoding, errors='replace')
+    except (urllib.error.URLError, ValueError) as error:
+      logging.error(f'Error: Failed to read input URL {url!r}: {error}')
+      raise
+    return io.StringIO(text)
 
 
 def chunk_input(lines):
