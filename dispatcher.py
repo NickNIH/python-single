@@ -14,6 +14,7 @@ import yaml
 assert sys.version_info.major >= 3, 'Python 3 required'
 
 DATA_DIR_DEFAULT = pathlib.Path('~/.local/share/nbsdata/dispatcher').expanduser()
+SILENCE_FILE = DATA_DIR_DEFAULT/'SILENCE'
 PERIODS = collections.OrderedDict(
   (
     ('min', {'dt':lambda dt: dt.minute}),
@@ -25,17 +26,16 @@ PERIODS = collections.OrderedDict(
 )
 
 DESCRIPTION = """Take actions based on the content of a simple input file."""
-
 USER_AGENT = 'dispatcher/1.0'
 
 
 def make_argparser():
   parser = argparse.ArgumentParser(add_help=False, description=DESCRIPTION)
   options = parser.add_argument_group('Options')
-  options.add_argument('infile', type=argparse.FileType('r'), default=sys.stdin, nargs='?',
-    help='Input file. Omit to read from stdin.')
-  options.add_argument('-u', '--url',
-    help='Read input from this url instead of a file.')
+  options.add_argument('input', nargs='?',
+    help='Input file or URL. Omit to read from stdin.')
+  options.add_argument('-u', '--url', action='store_true',
+    help='Force the input argument to be treated as a URL instead of a file.')
   options.add_argument('-c', '--config', type=argparse.FileType('r'),
     help='Config file for parameters and options.')
   options.add_argument('-w', '--whitelist', type=pathlib.Path, action='append', default=[],
@@ -71,7 +71,16 @@ def main(argv):
   for path in args.whitelist:
     settings['whitelist'].append(path.resolve())
 
-  input_stream = get_input_stream(args.infile, args.url)
+  input_type = None
+  if SILENCE_FILE.exists():
+    logging.warning(
+      'Warning: Silence file %r exists. Treating input arg as a file path.', str(SILENCE_FILE)
+    )
+    input_type = 'file'
+  elif args.url:
+    input_type = 'url'
+  input_stream = get_input_stream(args.input, input_type)
+  seen_commands = set()
 
   for lines in chunk_input(input_stream):
     # Parse the chunk.
@@ -91,38 +100,78 @@ def main(argv):
     if 'when' in params:
       if not execute_now(params['when'], args.precision):
         continue
+    seen_commands.add(command)
     # Execute the command.
-    fxn = COMMANDS[command]
+    fxn = COMMANDS[command]['execute']
     fxn(chunk_args, content, params)
+
+  # Call any "absent" handlers for commands that were not seen.
+  for name, info in COMMANDS.items():
+    if name in seen_commands:
+      continue
+    on_absent = info.get('on_absent')
+    if on_absent is not None:
+      on_absent(settings)
 
 
 def read_config(config_file, params):
   data = yaml.safe_load(config_file)
   if 'whitelist' in data:
     for path_str in data['whitelist']:
-      path = pathlib.Path(path_str).expanduser()
+      path = pathlib.Path(path_str)
       if not path.is_absolute():
         logging.error(f'Error: Config file whitelist path not absolute: {str(path)!r}')
       params['whitelist'].append(path)
 
 
-def get_input_stream(infile, url):
-  """Return a file-like object to read input from.
-  Uses the url if given; otherwise uses the infile/stdin argument."""
-  if url is None:
-    return infile
+def get_input_stream(input_arg, input_type):
+  """Return a file-like object to read `input_arg` from.
+  If `input_arg` is None or '-', read from stdin.
+  If `input_type` is 'url', treat `input_arg` as a URL. If `input_type` is 'file', treat `input_arg`
+  as a file.
+  Otherwise, use `input_arg` as a local path when it exists; if it does not exist but it looks like
+  a URL, treat it as a URL."""
+
+  if input_arg is None or input_arg == '-':
+    return sys.stdin
+
+  url = None
+
+  if input_type == 'url':
+    url = input_arg
   else:
-    try:
-      request = urllib.request.Request(url, headers={'User-Agent':USER_AGENT})
-      with urllib.request.urlopen(request) as response:
-        encoding = response.headers.get_content_charset()
-        if encoding is None:
-          encoding = 'utf-8'
-        text = response.read().decode(encoding, errors='replace')
-    except (urllib.error.URLError, ValueError) as error:
-      logging.error(f'Error: Failed to read input URL {url!r}: {error}')
-      raise
-    return io.StringIO(text)
+    path = pathlib.Path(input_arg)
+    if path.is_file():
+      try:
+        return path.open('r')
+      except OSError as error:
+        logging.error('Error: Failed to open input file %r: %s', str(path), error)
+        raise
+    elif input_type == 'file':
+      # If we're treating this as a file but it doesn't exist, fail loudly.
+      raise FileNotFoundError(f'Input file {str(path)!r} not found.')
+    # File does not exist. If it looks like a URL, treat it as one.
+    if input_arg.startswith(('http://', 'https://')):
+      url = input_arg
+    else:
+      # Behave like the old FileType('r'): try to open and fail loudly.
+      try:
+        return path.open('r')
+      except OSError as error:
+        logging.error('Error: Failed to open input file %r: %s', str(path), error)
+        raise
+
+  try:
+    request = urllib.request.Request(url, headers={'User-Agent':USER_AGENT})
+    with urllib.request.urlopen(request) as response:
+      encoding = response.headers.get_content_charset()
+      if encoding is None:
+        encoding = 'utf-8'
+      text = response.read().decode(encoding, errors='replace')
+  except (urllib.error.URLError, ValueError) as error:
+    logging.error(f'Error: Failed to read input URL {url!r}: {error}')
+    raise
+  return io.StringIO(text)
 
 
 def chunk_input(lines):
@@ -335,19 +384,33 @@ def do_shutdown(args, content, params):
   shutdown()
 
 
+def on_absent_shutdown(settings):
+  """Handle cases where no shutdown command is seen in the input.
+  If there is a pending shutdown request file, remove it so that a
+  later shutdown request is always treated as new. """
+  shutdown_path = settings['data_dir']/"shutdown.tsv"
+  if not shutdown_path.exists():
+    return
+  try:
+    shutdown_path.unlink()
+  except OSError as error:
+    logging.error(
+      f'Error: Failed to remove stale shutdown request file {str(shutdown_path)!r}: {error}'
+    )
+
+
 def show_shutdown_alert(remaining_seconds: int, *, log: bool, gui: bool):
   """Send shutdown alerts based on remaining time.
   `remaining_seconds` is the remaining delay until shutdown.
   `log` controls logging the constructed message.
-  `gui` controls sending desktop notifications.
-  """
+  `gui` controls sending desktop notifications. """
 
   now = datetime.datetime.now()
 
   if remaining_seconds > 0:
     minutes = (remaining_seconds + 59)//60
     shutdown_time = now + datetime.timedelta(seconds=remaining_seconds)
-    shutdown_time_str = shutdown_time.strftime('%H:%M')
+    shutdown_time_str = shutdown_time.strftime('%I:%M %p').lstrip('0')
     message = (
       f'System will shut down at {shutdown_time_str} '
       f'(in {minutes} minute' + ('s' if minutes != 1 else '') + ').'
@@ -368,8 +431,8 @@ def show_shutdown_alert(remaining_seconds: int, *, log: bool, gui: bool):
   except (FileNotFoundError, OSError) as error:
     logging.error(f'Error: notify-send failed: {error}')
 
-  # Also try to show a dialog via zenity.
-  cmd = ('zenity', '--info', '--title', 'Shutdown requested', '--text', message)
+  # Also try to show a warning dialog via zenity.
+  cmd = ('zenity', '--warning', '--title', 'Shutdown requested', '--text', message)
   try:
     subprocess.Popen(
       cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
@@ -432,9 +495,16 @@ def shutdown():
 
 
 COMMANDS = {
-  'echo':do_echo,
-  'cat':do_cat,
-  'shutdown':do_shutdown,
+  'echo':{
+    'execute': do_echo,
+  },
+  'cat':{
+    'execute': do_cat,
+  },
+  'shutdown':{
+    'execute': do_shutdown,
+    'on_absent': on_absent_shutdown,
+  },
 }
 
 
