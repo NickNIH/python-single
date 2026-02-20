@@ -15,10 +15,11 @@ SOCKET_DIR_DEFAULT = pathlib.Path('/run')
 MAX_LINE_LENGTH = 10 * 1024  # 10 KiB limit for a single request line.
 
 DESCRIPTION = """Root daemon providing privileged operations via a Unix domain socket."""
-
+EPILOG = """You can ensure one (and only one) instance of this daemon is running by adding a root
+cron job like `* * * * * flock -n /run/root-daemon.me.lock "$HOME/bin/root-daemon.py" --user me`"""
 
 def make_argparser():
-    parser = argparse.ArgumentParser(add_help=False, description=DESCRIPTION)
+    parser = argparse.ArgumentParser(add_help=False, description=DESCRIPTION, epilog=EPILOG)
     options = parser.add_argument_group('Options')
     options.add_argument('-u', '--user',
         help='The user who should be able to write to the socket. Default: the current user.')
