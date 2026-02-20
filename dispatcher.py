@@ -4,7 +4,10 @@ import collections
 import datetime
 import io
 import logging
+import os
 import pathlib
+import pwd
+import socket
 import subprocess
 import sys
 import time
@@ -24,9 +27,11 @@ PERIODS = collections.OrderedDict(
     ('week',{'dt':lambda dt: dt.weekday()+1})
   )
 )
-
-DESCRIPTION = """Take actions based on the content of a simple input file."""
+SOCKET_DIR_DEFAULT = pathlib.Path('/run')
 USER_AGENT = 'dispatcher/1.0'
+SOCKET_TIMEOUT_DEFAULT = 60.0
+SOCKET_MAX_LINE_LENGTH = 10 * 1024  # 10 KiB limit for a single response line.
+DESCRIPTION = """Take actions based on the content of a simple input file."""
 
 
 def make_argparser():
@@ -45,6 +50,11 @@ def make_argparser():
     help='Time precision of execution. How many minutes since the last time this was executed? '
       'Required for any command with a ?when parameter. Currently only applied to the ?when hour '
       'and minute.')
+  options.add_argument('--root-socket', type=pathlib.Path,
+    help='Unix domain socket path for the root daemon. By default, it will be '
+      f"{SOCKET_DIR_DEFAULT}/root-daemon.[user].sock, where [user] is the current user.")
+  options.add_argument('--socket-timeout', type=float, default=SOCKET_TIMEOUT_DEFAULT,
+    help='Timeout in seconds when communicating with the root daemon (default: %(default)s).')
   options.add_argument('-h', '--help', action='help',
     help='Print this argument help text and exit.')
   logs = parser.add_argument_group('Logging')
@@ -70,6 +80,15 @@ def main(argv):
     read_config(args.config, settings)
   for path in args.whitelist:
     settings['whitelist'].append(path.resolve())
+
+  # Root daemon communication settings.
+  if args.root_socket is not None:
+    root_socket = args.root_socket
+  else:
+    user = pwd.getpwuid(os.getuid()).pw_name
+    root_socket = SOCKET_DIR_DEFAULT/f'root-daemon.{user}.sock'
+  settings['root_socket'] = root_socket
+  settings['socket_timeout'] = args.socket_timeout
 
   input_type = None
   if SILENCE_FILE.exists():
@@ -381,7 +400,23 @@ def do_shutdown(args, content, params):
   except OSError as error:
     logging.error(f'Error: Failed to remove shutdown request file {str(shutdown_path)!r}: {error}')
 
-  shutdown()
+  # First, try to shut down via the unprivileged DBus path.
+  shutdown_ok = False
+  try:
+    shutdown_ok = shutdown()
+  except Exception as error:  # noqa: BLE001
+    logging.error(f'Error: shutdown() raised {error!r}; falling back to root daemon.')
+
+  if shutdown_ok:
+    return
+
+  # If the DBus shutdown path failed (or is unavailable), fall back to the
+  # root daemon. This requires that root-daemon.py be running and that its
+  # socket be accessible to this user.
+  socket_path = params.get('root_socket')
+  timeout = params.get('socket_timeout')
+  if not shutdown_via_root_daemon(socket_path, timeout=timeout):
+    logging.error('Error: Shutdown via root daemon also failed.')
 
 
 def on_absent_shutdown(settings):
@@ -477,8 +512,8 @@ def parse_time(min_str: str) -> int:
 def shutdown():
   # pydbus is required: `sudo apt install python3-pydbus` on Ubuntu 24.04 (also installs gi)
   # This is the only way (I know of) to shut down without sudo.
-  import gi
-  import pydbus
+  import gi # type: ignore[import-untyped]
+  import pydbus # type: ignore[import-untyped]
   # https://stackoverflow.com/questions/23013274/shutting-down-computer-linux-using-python/23013969#23013969
   bus = pydbus.SystemBus()
   try:
@@ -488,10 +523,88 @@ def shutdown():
     return False
   logging.info('Shutting down.')
   if proxy.CanPowerOff():
-    proxy.PowerOff(False)
+    try:
+      proxy.PowerOff(False)
+    except gi.repository.GLib.GError as error:
+      logging.error(f'Error: Failed to shut down the system: {error}')
+      return False
   else:
     logging.error('Error: System does not support shutting down.')
     return False
+  return True
+
+
+def shutdown_via_root_daemon(
+  socket_path: pathlib.Path, *, timeout: float = SOCKET_TIMEOUT_DEFAULT
+) -> bool:
+  """Request shutdown via the root daemon over a Unix domain socket.
+  Returns True on apparent success, False on failure."""
+
+  response = socket_request(socket_path, 'shutdown', timeout=timeout)
+  if response is None:
+    return False
+
+  # Expect a tab-delimited "status<TAB>message" response from the daemon.
+  status, _, message = response.partition('\t')
+  status = status.strip().lower()
+  message = message.strip()
+
+  if status == 'success':
+    logging.info('Shutdown via root daemon succeeded: %s', message or response)
+    return True
+
+  logging.error('Error: Root daemon reported failure: %s', message or response)
+  return False
+
+
+def socket_request(
+  socket_path: pathlib.Path,
+  line: str,
+  *,
+  timeout: float = SOCKET_TIMEOUT_DEFAULT,
+  max_line_length: int = SOCKET_MAX_LINE_LENGTH,
+) -> str | None:
+  """Send a single line to a Unix domain socket and return the response.
+
+  `socket_path` is the path to the Unix domain socket.
+  `line` is the request line (without trailing newline).
+
+  Returns the stripped response line on success, or None on failure.
+  """
+
+  try:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
+      conn.settimeout(timeout)
+      conn.connect(str(socket_path))
+
+      reader = conn.makefile('r', encoding='utf-8', errors='replace')
+      writer = conn.makefile('w', encoding='utf-8', errors='replace')
+      try:
+        writer.write(f'{line}\n')
+        writer.flush()
+
+        response = reader.readline(max_line_length)
+      finally:
+        try:
+          reader.close()
+        except Exception:  # noqa: BLE001
+          pass
+        try:
+          writer.close()
+        except Exception:  # noqa: BLE001
+          pass
+  except FileNotFoundError as error:
+    logging.error('Error: Unix socket %s not found: %s', socket_path, error)
+    return None
+  except (OSError, TimeoutError) as error:
+    logging.error('Error: Failed to communicate with Unix socket %s: %s', socket_path, error)
+    return None
+
+  if not response:
+    logging.error('Error: No response received from Unix socket %s.', socket_path)
+    return None
+
+  return response.strip()
 
 
 COMMANDS = {
